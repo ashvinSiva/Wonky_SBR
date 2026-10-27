@@ -1,4 +1,4 @@
-/**
+/*
  * Notes:
  * Peripherals: hardware component that performs a specific function alongside a CPU
  * - examples: Interal Peripherals - GPIO, ADC, UART, LEDC | External Peripherals - Temperature sensor, Accelerometer, OLED Display, LCD Display
@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdint.h> 
 #include <stdbool.h> 
+#include <math.h>
 
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
@@ -29,10 +30,12 @@
 #define Z_PIN ADC_CHANNEL_0
 
 // To accurately calculate the axis
-#define AVG 1000
+#define AVG 100
 
 // Define Control Period
 #define CONTROL_PERIOD_MS 10
+#define THETA_T 0
+#define g 9.81
 
 //Global Variables
 adc_oneshot_unit_handle_t adc_handle;
@@ -66,21 +69,26 @@ void init_adc() {
     };
 
     // Configure each Channel 
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, X_PIN, &channel_config)); 
+    // ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, X_PIN, &channel_config)); for now ignore x-axis until we measure tilt side ways
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, Y_PIN, &channel_config));
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, Z_PIN, &channel_config));
 }
 
 // Functions
-void read_accelerometer(float *y_val) {
+void read_accelerometer(float *y_val, float* z_val) {
     // Reads raw 12-bit values [0,4095] from ADXL335
     int raw_y; 
-    int y_axis = 0; 
+    int raw_z;
+    float y_axis = 0.0; 
+    float z_axis = 0.0;
     for (int i = 0; i < AVG; i++) {
         ESP_ERROR_CHECK( adc_oneshot_read(adc_handle, Y_PIN, &raw_y) ); 
         y_axis += raw_y;
+        ESP_ERROR_CHECK( adc_oneshot_read(adc_handle, Z_PIN, &raw_z) ); 
+        z_axis += raw_z;
     }  
     *y_val = y_axis/AVG; 
+    *z_val = z_axis/AVG; 
 }
 
 void update_motors(float correction) {
@@ -89,16 +97,22 @@ void update_motors(float correction) {
 
 void control_task(void* pvParameters) {
     
-
-
-    int raw_y = 0; 
+    float raw_y = 0; 
+    float raw_z = 0;
 
     while(1) {
 
-        read_accelerometer(&raw_y); 
+        read_accelerometer(&raw_y, &raw_z); 
         float y_axis = (float)(raw_y - 2048); 
+        float z_axis = (float)(raw_z - 2048); 
+    
+        float theta_m = atan2(z_axis, y_axis);
+        float e = THETA_T - theta_m; 
 
 
+
+
+        vTaskDelay( pdMS_TO_TICKS(CONTROL_PERIOD_MS) );
     }
 
 } 
@@ -112,3 +126,4 @@ void app_main(void) {
     // Program Loop
     xTaskCreate(control_task, "control task", 4096, NULL, 5, NULL); 
 }
+
