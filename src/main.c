@@ -36,17 +36,17 @@
 #define Z_PIN ADC_CHANNEL_0
 
 // Define Control Period
-#define CONTROL_PERIOD_MS 10
+#define CONTROL_PERIOD_MS 200
 // To accurately calculate the axis
-#define AVG 100
+#define AVG 8
 // Target angle which physically describes the SBR standing straight up
-#define THETA_T 0
+#define THETA_T 0.0f
 // Definiton of g
 #define g 9.81f
 // Define Gain Constants
-#define KP 1
-#define KI 0
-#define KD 0
+#define KP 1.0f
+#define KI 1.0f
+#define KD 1.0f
 
 #define PWM_TIMER LEDC_TIMER_0
 #define PWM_MODE LEDC_LOW_SPEED_MODE
@@ -58,7 +58,6 @@
 
 //Global Variables
 adc_oneshot_unit_handle_t adc_handle;
-
 // Initialize
 void init_motors() {
     gpio_reset_pin(LM1); 
@@ -130,31 +129,48 @@ void init_pwm() {
 }
  
 // Functions
-void read_accelerometer(float *y_val, float* z_val) {
+float filteredY = 0; 
+float filteredZ = 0;
+float alpha = 0.5; 
+void read_accelerometer(int *y_val, int* z_val) {
+    // Initially implemented the averageing method, then replaced it with low-pass filter method, 
+    // Finally averaging the reading and use that reading into the low-pass filter formula
+
     // Reads raw 12-bit values [0,4095] from ADXL335
     int raw_y; 
     int raw_z;
-    float y_axis = 0.0; 
-    float z_axis = 0.0;
+    int y_tot = 0; 
+    int z_tot = 0; 
 
     for (int i = 0; i < AVG; i++) {
-        ESP_ERROR_CHECK( adc_oneshot_read(adc_handle, Y_PIN, &raw_y) ); 
-        y_axis += raw_y;
-        ESP_ERROR_CHECK( adc_oneshot_read(adc_handle, Z_PIN, &raw_z) ); 
-        z_axis += raw_z;
-    }  
+        ESP_ERROR_CHECK( adc_oneshot_read(adc_handle, Y_PIN, &raw_y) );
+        y_tot += raw_y; 
+        ESP_ERROR_CHECK( adc_oneshot_read(adc_handle, Z_PIN, &raw_z) );
+        z_tot += raw_z;
+    }
+    y_tot /= AVG; 
+    z_tot /= AVG;
 
-    *y_val = y_axis/AVG; 
-    *z_val = z_axis/AVG; 
+    if (filteredY != 0 && filteredZ != 0) {
+        filteredY = alpha * y_tot + (1 - alpha) * filteredY;
+        filteredZ = alpha * z_tot + (1 - alpha) * filteredZ;
+    } else {
+        filteredY = y_tot; 
+        filteredZ = z_tot;
+    }
+    *y_val = filteredY; 
+    *z_val = filteredZ;  
+
 }
 
 void update_motors(float u) {
     
-    if (u < 0.0f) {
+    if (u > -40.0f && u < 0.0f) {
         gpio_set_level(LM1, 1);
         gpio_set_level(LM2, 0); 
         gpio_set_level(RM3, 1); 
         gpio_set_level(RM4, 0); 
+
         
     } else if(u > 0.0f) {
         gpio_set_level(LM1, 0);
@@ -178,8 +194,8 @@ void set_motor_pwm() {
 
 void control_task(void* pvParameters) {
     
-    float raw_y = 0; 
-    float raw_z = 0;
+    int raw_y = 0; 
+    int raw_z = 0;
 
     float integral = 0.0f;
     float derivative = 0.0f; 
@@ -187,22 +203,41 @@ void control_task(void* pvParameters) {
     int64_t prev_time = esp_timer_get_time(); 
 
     while(1) {
-
+        printf("----------------------------------------------------------------------------------------\n");
         read_accelerometer(&raw_y, &raw_z); 
-        float y_axis = (float)(raw_y - 2048); 
-        float z_axis = (float)(raw_z - 2048); 
-        float theta_m = atan2(z_axis, y_axis);
+        int y_axis = 0; 
+        int z_axis = 0;
+        float theta_m = 0;
+
+        if ((2719 <= raw_y && raw_y <= 2723) && (3488 <= raw_z && raw_z <= 3491)) {
+
+            y_axis = 0; 
+            z_axis = 0; 
+            theta_m = 0; 
+
+        } else {
+
+            y_axis = (raw_y - 2722); //  0g horizontal forward
+            z_axis = (raw_z - 3489); //  1g vertical upward
+            theta_m = atan2((double)z_axis, (double)y_axis);
+            theta_m *= (180/M_PI); // convert from radians to degrees
+            
+        }
+
+        printf("theta_m: %.2f | raw_y: %d | raw_z: %d\n", theta_m, raw_y, raw_z);
 
         float e = THETA_T - theta_m; 
         
-        int64_t curr_time = esp_timer_get_time(); 
+        int64_t curr_time = esp_timer_get_time(); // returns time in microseconds
 
-        float delta_t = curr_time - prev_time;  
-        integral += e * delta_t; 
+        float delta_t = (curr_time - prev_time)/1000000.0f;  
+        integral = e * delta_t; 
         if (delta_t > 0.0f) 
             derivative = (e-prev_e)/delta_t;
 
-        float u = e*KP + integral*KP + derivative*KD; 
+        float u = (KP * e) + (KI * integral) + (KD * derivative); // so many confusing fixes 
+
+        printf("y: %d | z: %d | error: %.2f | u: %.2f\n", y_axis, z_axis, e, u); 
 
         update_motors(u);
 

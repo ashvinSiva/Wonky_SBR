@@ -7,4 +7,5 @@
 build/ 
 dist/
 .DS_Store
+*.code_workspace
 
